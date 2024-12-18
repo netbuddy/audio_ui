@@ -1,0 +1,8 @@
+streamlit
+websockets
+pyaudio
+fastapi
+uvicorn
+docker
+python-multipart
+moviepy

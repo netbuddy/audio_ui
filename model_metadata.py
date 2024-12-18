@@ -1,0 +1,43 @@
+audio_model_name_maps = {
+    "paraformer-asr": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+    "paraformer-asr-contextual": "iic/speech_paraformer-large-contextual_asr_nat-zh-cn-16k-common-vocab8404",
+    "paraformer-asr-seaco": "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+    "paraformer-asr-vad-punc": "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+    "paraformer-asr-vad-punc-spk": "iic/speech_paraformer-large-vad-punc-spk_asr_nat-zh-cn",
+    "paraformer-asr-streaming": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
+    "fsmn-vad": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+    "ct-punc": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+    "ct-punc-c": "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+    "fa-zh": "iic/speech_timestamp_prediction-v1-16k-offline",
+    "cam++": "iic/speech_campplus_sv_zh-cn_16k-common",
+    "Whisper-large-v2": "iic/speech_whisper-large_asr_multilingual",
+    "Whisper-large-v3": "iic/Whisper-large-v3",
+    "Qwen-Audio": "Qwen/Qwen-Audio",
+    "emotion2vec_plus_large": "iic/emotion2vec_plus_large",
+    "emotion2vec_plus_base": "iic/emotion2vec_plus_base",
+    "emotion2vec_plus_seed": "iic/emotion2vec_plus_seed",
+    "Whisper-large-v3-turbo": "iic/Whisper-large-v3-turbo",
+}
+
+audio_model_capabilities = ["语音识别(ASR)", "语音活动检测(VAD)", "标点恢复(PR)", "语音分离(SD)", "说话人识别(SID)", "关键词检测(KWS)", "语音增强 (SE)", "情感识别 (SER)", "语音对齐(SA)", "热词定制(HWC)", "实时处理(ONLINE)"]
+
+audio_model_capability_maps = {
+    "paraformer-asr": ["语音识别(ASR)"],
+    "paraformer-asr-contextual": ["语音识别(ASR)", "热词定制(HWC)"],
+    "paraformer-asr-seaco": ["语音识别(ASR)", "热词定制(HWC)"],
+    "paraformer-asr-vad-punc": ["语音识别(ASR)", "语音活动检测(VAD)", "标点恢复(PR)"],
+    "paraformer-asr-vad-punc-spk": ["语音识别(ASR)", "语音活动检测(VAD)", "标点恢复(PR)", "语音分离(SD)"],
+    "paraformer-asr-streaming": ["语音识别(ASR)", "实时处理(ONLINE)"],
+    "fsmn-vad": ["语音活动检测(VAD)"],
+    "ct-punc": ["标点恢复(PR)"],
+    "ct-punc-c": ["标点恢复(PR)"],
+    "fa-zh": ["语音对齐(SA)"],
+    "cam++": ["语音分离(SD)"],
+    "Whisper-large-v2": ["语音识别(ASR)"],
+    "Whisper-large-v3": ["语音识别(ASR)"],
+    "Qwen-Audio": ["语音识别(ASR)"],
+    "emotion2vec_plus_large": ["情感识别 (SER)"],
+    "emotion2vec_plus_base": ["情感识别 (SER)"],
+    "emotion2vec_plus_seed": ["情感识别 (SER)"],
+    "Whisper-large-v3-turbo": ["语音识别(ASR)"],
+}

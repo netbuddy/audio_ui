@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.env
+.venv
+env/
+venv/
+ENV/
+.python-version
+
+# IDE
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Project specific
+logs/
+*.log
+*.wav
+*.mp3
+*.mp4
+*.avi
+*.pcm
+temp/
+models/
+hotwords.txt
+
+# Streamlit
+.streamlit/
+
+# SSL certificates
+*.crt
+*.key
+*.pem
+
+# Cache
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*~ 
