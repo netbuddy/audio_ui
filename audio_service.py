@@ -15,6 +15,8 @@ from threading import Lock
 import json
 import time
 from model_metadata import audio_model_name_maps
+from sse_starlette.sse import EventSourceResponse
+import websockets
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -407,6 +409,248 @@ async def get_metrics():
         "total_requests": service.total_requests,
         "error_count": service.error_count
     }
+
+# 添加请求体模型
+class StreamRequest(BaseModel):
+    """流式识别请求"""
+    url: str
+
+# 添加代理配置
+class ProxyConfig(BaseModel):
+    """代理配置"""
+    http_proxy: Optional[str] = None
+    https_proxy: Optional[str] = None
+    socks_proxy: Optional[str] = None
+
+# 从环境变量加载代理配置
+def get_proxy_config() -> ProxyConfig:
+    """获取代理配置"""
+    return ProxyConfig(
+        http_proxy=os.getenv("HTTP_PROXY"),
+        https_proxy=os.getenv("HTTPS_PROXY"),
+        socks_proxy=os.getenv("SOCKS_PROXY")
+    )
+
+@app.post("/recognize_stream")
+async def recognize_stream(request: StreamRequest):
+    """从流媒体URL实时识别音频"""
+    try:
+        logger.info(f"Starting stream recognition for URL: {request.url}")
+        
+        # 获取代理配置
+        proxy_config = get_proxy_config()
+        logger.info(f"Proxy config: {proxy_config}")
+        
+        # 构建 ffmpeg 命令
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-re',              # 实时模式
+        ]
+        
+        # 添加代理参数
+        if proxy_config.http_proxy:
+            ffmpeg_cmd.extend([
+                '-http_proxy', proxy_config.http_proxy
+            ])
+        if proxy_config.https_proxy:
+            ffmpeg_cmd.extend([
+                '-https_proxy', proxy_config.https_proxy
+            ])
+        if proxy_config.socks_proxy:
+            ffmpeg_cmd.extend([
+                '-socks_proxy', proxy_config.socks_proxy
+            ])
+            
+        # 添加其他参数
+        ffmpeg_cmd.extend([
+            '-i', request.url,  # 输入URL
+            '-vn',             # 不处理视频
+            '-acodec', 'pcm_s16le',
+            '-ar', '16000',
+            '-ac', '1',
+            '-f', 'wav',
+            'pipe:1',          # 输出到管道
+        ])
+        
+        logger.info(f"FFmpeg command: {' '.join(ffmpeg_cmd)}")
+        
+        try:
+            # 启动 ffmpeg 进程
+            process = await asyncio.create_subprocess_exec(
+                *ffmpeg_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            logger.info(f"FFmpeg process started with PID: {process.pid}")
+            
+            # 检查进程是否成功启动
+            if process.returncode is not None:
+                error_msg = await process.stderr.read()
+                logger.error(f"FFmpeg process failed to start: {error_msg.decode()}")
+                raise Exception(f"FFmpeg failed to start: {error_msg.decode()}")
+                
+        except Exception as e:
+            logger.error(f"Error starting FFmpeg process: {e}")
+            raise
+
+        # 创建 SSE 响应
+        async def event_generator():
+            chunk_size = 32000  # 2秒的音频数据
+            cache = {}
+            has_data = False
+            total_bytes = 0
+            
+            try:
+                logger.info("Starting to read audio data...")
+                while True:
+                    try:
+                        chunk = await process.stdout.read(chunk_size)
+                        if not chunk:
+                            logger.info("End of audio stream reached")
+                            break
+                            
+                        total_bytes += len(chunk)
+                        has_data = True
+                        logger.debug(f"Read {len(chunk)} bytes (total: {total_bytes})")
+                        
+                        # 使用模型处理音频块
+                        result = service.model.generate(
+                            input=chunk,
+                            cache=cache,
+                            is_final=False,
+                            chunk_size=[0, 10, 5],
+                            encoder_chunk_look_back=4,
+                            decoder_chunk_look_back=1
+                        )
+                        
+                        if result:
+                            logger.debug(f"Generated result: {result}")
+                            yield {
+                                "event": "transcript",
+                                "data": json.dumps({
+                                    "status": "success",
+                                    "result": result
+                                })
+                            }
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing chunk: {e}")
+                        # 检查 ffmpeg 进程状态
+                        if process.returncode is not None:
+                            error_msg = await process.stderr.read()
+                            logger.error(f"FFmpeg process error: {error_msg.decode()}")
+                        break
+                
+                # 只在有数据时处理最后一块
+                if has_data and cache:
+                    logger.info("Processing final chunk...")
+                    try:
+                        final_result = service.model.generate(
+                            input=b"",
+                            cache=cache,
+                            is_final=True
+                        )
+                        
+                        if final_result:
+                            logger.info(f"Final result: {final_result}")
+                            yield {
+                                "event": "transcript",
+                                "data": json.dumps({
+                                    "status": "success",
+                                    "result": final_result,
+                                    "is_final": True
+                                })
+                            }
+                    except Exception as e:
+                        logger.error(f"Error processing final chunk: {e}")
+                        
+            finally:
+                logger.info("Cleaning up FFmpeg process...")
+                process.terminate()
+                await process.wait()
+                logger.info(f"FFmpeg process terminated with return code: {process.returncode}")
+                
+            # 如果没有数据，返回错误信息
+            if not has_data:
+                logger.error("No audio data received from URL")
+                yield {
+                    "event": "error",
+                    "data": json.dumps({
+                        "status": "error",
+                        "message": "No audio data received from URL"
+                    })
+                }
+
+        return EventSourceResponse(event_generator())
+        
+    except Exception as e:
+        logger.error(f"Stream recognition error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.websocket("/stream")
+async def stream_audio(websocket: WebSocket):
+    """处理从浏览器发送的音频流"""
+    try:
+        await websocket.accept()
+        session = StreamingSession(websocket)
+        
+        with service.session_lock:
+            service.streaming_sessions[id(websocket)] = session
+            
+        try:
+            while True:
+                # 接收音频数据
+                data = await websocket.receive_bytes()
+                
+                # 处理音频数据
+                audio_array = np.frombuffer(data, dtype=np.int16)
+                
+                # 使用模型处理
+                result = service.model.generate(
+                    input=audio_array,
+                    cache=session.cache,
+                    is_final=False,
+                    chunk_size=[0, 10, 5],
+                    encoder_chunk_look_back=4,
+                    decoder_chunk_look_back=1
+                )
+                
+                if result:
+                    await websocket.send_json({
+                        "status": "success",
+                        "result": service._process_result(result)
+                    })
+                    
+        except websockets.exceptions.ConnectionClosed:
+            logger.info("WebSocket connection closed")
+            
+        finally:
+            # 处理最后一块数据
+            if session.cache:
+                try:
+                    final_result = service.model.generate(
+                        input=b"",
+                        cache=session.cache,
+                        is_final=True
+                    )
+                    
+                    if final_result:
+                        await websocket.send_json({
+                            "status": "success",
+                            "result": service._process_result(final_result),
+                            "is_final": True
+                        })
+                except Exception as e:
+                    logger.error(f"Error processing final chunk: {e}")
+                    
+            # 清理会话
+            with service.session_lock:
+                if id(websocket) in service.streaming_sessions:
+                    del service.streaming_sessions[id(websocket)]
+                    
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        await websocket.close()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)

@@ -13,6 +13,7 @@ import tempfile
 import subprocess
 import logging
 from moviepy.video.io.VideoFileClip import VideoFileClip
+import asyncio
 
 # 加载环境变量
 load_dotenv()
@@ -268,7 +269,7 @@ with st.sidebar:
             ] if selected
         ]
         
-        # 显示选择的模型能力
+        # 显示选择模型能力
         if st.session_state.selected_models:
             capabilities = set()
             for model in st.session_state.selected_models:
@@ -553,33 +554,159 @@ def start_recognition_from_video():
             st.error("请先启动语音识别服务")
             return
             
-        # 检查是否有上传的视频文件
-        if "video_upload" not in st.session_state or st.session_state.video_upload is None:
-            st.error("请先上传视频文件")
-            return
-            
-        video_file = st.session_state.video_upload
+        # 检查是否有上传的视频文件或URL
+        video_url = st.session_state.get("video_url")
+        has_upload = "video_upload" in st.session_state and st.session_state.video_upload is not None
         
-        # 提取音频
-        with st.spinner('正在从视频提取音频...'):
-            temp_path, audio_file = extract_audio_from_video(video_file)
-            
-        if not audio_file:
+        if not has_upload and not video_url:
+            st.error("请先上传视频文件或输入视频URL")
             return
             
-        try:
-            # 直接调用 start_recognition 并传入音频文件
-            start_recognition(audio_file)
-            
-        finally:
-            # 清理临时文件
+        # 处理本地上传的视频
+        if has_upload:
+            video_file = st.session_state.video_upload
+            # 提取音频
+            with st.spinner('正在从视频提取音频...'):
+                temp_path, audio_file = extract_audio_from_video(video_file)
+                
+            if not audio_file:
+                return
+                
             try:
-                os.remove(temp_path)
-            except Exception:
-                pass
+                # 直接调用 start_recognition 并传入音频文件
+                start_recognition(audio_file)
+                
+            finally:
+                # 清理临时文件
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+                    
+        # 处理视频URL
+        else:
+            # 使用 SSE 接收实时转录结果
+            with st.spinner('正在识别在线视频音频...'):
+                response = requests.post(
+                    f"{ASR_SERVICE_URL}/recognize_stream",
+                    json={"url": video_url},
+                    stream=True,
+                    headers={"Accept": "text/event-stream"}
+                )
+                
+                if response.status_code != 200:
+                    st.error(f"请求失败: {response.status_code}")
+                    return
+                    
+                # 创建占位符用于显示实时转录结果
+                transcript_placeholder = st.empty()
+                current_text = ""
+                
+                # 处理 SSE 事件
+                for line in response.iter_lines():
+                    if line:
+                        try:
+                            line_text = line.decode()
+                            # 只处理数据行
+                            if line_text.startswith("data: "):
+                                data = line_text.replace("data: ", "")
+                                event_data = json.loads(data)
+                                
+                                if event_data["status"] == "success":
+                                    result = event_data["result"]
+                                    
+                                    # 更新显示的文本
+                                    if isinstance(result, list) and result and "text" in result[0]:
+                                        current_text += result[0]["text"]
+                                        transcript_placeholder.text(current_text)
+                                        
+                                    # 如果是最终结果，保存到 session state
+                                    if event_data.get("is_final"):
+                                        st.session_state.recognition_text = current_text
+                                        if isinstance(result, list) and result:
+                                            st.session_state.recognition_segments = result[0].get("segments", [])
+                                        else:
+                                            st.session_state.recognition_segments = []
+                                        
+                                        # 格式化显示
+                                        formatted_text = format_text_with_options(
+                                            current_text,
+                                            st.session_state.recognition_segments,
+                                            st.session_state.get("show_timestamp", True),
+                                            st.session_state.get("show_speaker", True)
+                                        )
+                                        st.session_state.original_text = formatted_text
+                                        
+                        except Exception as e:
+                            st.error(f"处理转录结果失败: {str(e)}")
+                            st.error(f"Error processing transcript: {e}", exc_info=True)
                 
     except Exception as e:
         st.error(f"视频识别失败: {str(e)}")
+
+def start_recognition_from_url():
+    """从流媒体URL开始识别"""
+    try:
+        # 检查服务是否运行
+        if st.session_state.service_status != "运行中":
+            st.error("请先启动语音识别服务")
+            return
+            
+        # 检查是否有URL
+        video_url = st.session_state.get("video_url")
+        if not video_url:
+            st.error("请先输入视频URL")
+            return
+            
+        # 创建占位符用于显示实时转录结果
+        transcript_placeholder = st.empty()
+        
+        # 使用 SSE 接收实时转录结果
+        with st.spinner('正在识别音频...'):
+            with requests.get(
+                f"{ASR_SERVICE_URL}/recognize_stream",
+                params={"url": video_url},
+                stream=True,
+                headers={"Accept": "text/event-stream"}
+            ) as response:
+                
+                if response.status_code != 200:
+                    st.error(f"请求失败: {response.status_code}")
+                    return
+                    
+                # 处理 SSE 事件
+                current_text = ""
+                for line in response.iter_lines():
+                    if line:
+                        try:
+                            event_data = json.loads(line.decode().split("data: ")[1])
+                            if event_data["status"] == "success":
+                                result = event_data["result"]
+                                
+                                # 更新显示的文本
+                                if "text" in result:
+                                    current_text += result["text"]
+                                    transcript_placeholder.text(current_text)
+                                    
+                                # 如果是最终结果，保存到 session state
+                                if event_data.get("is_final"):
+                                    st.session_state.recognition_text = current_text
+                                    st.session_state.recognition_segments = result.get("segments", [])
+                                    
+                                    # 格式化显示
+                                    formatted_text = format_text_with_options(
+                                        current_text,
+                                        st.session_state.recognition_segments,
+                                        st.session_state.get("show_timestamp", True),
+                                        st.session_state.get("show_speaker", True)
+                                    )
+                                    st.session_state.original_text = formatted_text
+                                    
+                        except Exception as e:
+                            st.error(f"处理转录结果失败: {str(e)}")
+                            
+    except Exception as e:
+        st.error(f"流媒体识别失败: {str(e)}")
 
 # 主区域
 # 创建两列布局
@@ -593,18 +720,199 @@ with col_audio:
     st.audio(uploaded_file)
     audio_value = st.audio_input("音频输入")
 
+def inject_audio_capture_js():
+    """注入基于 WebRTC 的音频捕获 JavaScript 代码"""
+    st.markdown("""
+    <script>
+    class AudioStreamProcessor {
+        constructor() {
+            this.mediaRecorder = null;
+            this.websocket = null;
+            this.audioContext = null;
+            this.isRecording = false;
+            this.chunks = [];
+            this.CHUNK_SIZE = 2048; // 每个音频块的大小
+        }
+        
+        async initAudioCapture(videoElement) {
+            try {
+                // 获取视频的音频轨道
+                const stream = videoElement.captureStream();
+                const audioTrack = stream.getAudioTracks()[0];
+                
+                if (!audioTrack) {
+                    console.error('No audio track found in video');
+                    return;
+                }
+                
+                // 创建音频上下文
+                this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 16000,
+                    channelCount: 1
+                });
+                
+                // 创建 MediaStream
+                const audioStream = new MediaStream([audioTrack]);
+                
+                // 创建 MediaRecorder
+                this.mediaRecorder = new MediaRecorder(audioStream, {
+                    mimeType: 'audio/webm;codecs=opus',
+                    audioBitsPerSecond: 16000
+                });
+                
+                // 连接 WebSocket
+                this.websocket = new WebSocket('ws://localhost:8001/stream');
+                
+                // 处理音频数据
+                this.mediaRecorder.ondataavailable = async (event) => {
+                    if (event.data.size > 0 && this.websocket.readyState === WebSocket.OPEN) {
+                        // 将 Blob 转换为 ArrayBuffer
+                        const arrayBuffer = await event.data.arrayBuffer();
+                        const audioData = await this.audioContext.decodeAudioData(arrayBuffer);
+                        const pcmData = this.convertToMono16(audioData);
+                        
+                        // 分块发送数据
+                        for (let i = 0; i < pcmData.length; i += this.CHUNK_SIZE) {
+                            const chunk = pcmData.slice(i, i + this.CHUNK_SIZE);
+                            this.websocket.send(chunk.buffer);
+                        }
+                    }
+                };
+                
+                // 开始录制
+                this.mediaRecorder.start(100); // 每 100ms 触发一次 ondataavailable
+                this.isRecording = true;
+                
+                // 监听视频事件
+                videoElement.addEventListener('pause', () => this.pauseRecording());
+                videoElement.addEventListener('play', () => this.resumeRecording());
+                videoElement.addEventListener('ended', () => this.stopRecording());
+                
+            } catch (error) {
+                console.error('Error initializing audio capture:', error);
+            }
+        }
+        
+        convertToMono16(audioBuffer) {
+            const samples = audioBuffer.getChannelData(0);
+            const pcmData = new Int16Array(samples.length);
+            
+            for (let i = 0; i < samples.length; i++) {
+                pcmData[i] = Math.max(-1, Math.min(1, samples[i])) * 0x7FFF;
+            }
+            
+            return pcmData;
+        }
+        
+        pauseRecording() {
+            if (this.isRecording && this.mediaRecorder) {
+                this.mediaRecorder.pause();
+                this.isRecording = false;
+            }
+        }
+        
+        resumeRecording() {
+            if (!this.isRecording && this.mediaRecorder) {
+                this.mediaRecorder.resume();
+                this.isRecording = true;
+            }
+        }
+        
+        async stopRecording() {
+            if (this.mediaRecorder) {
+                this.mediaRecorder.stop();
+                this.isRecording = false;
+            }
+            
+            if (this.websocket) {
+                // 发送结束信号
+                await this.websocket.send(JSON.stringify({
+                    type: 'end'
+                }));
+                this.websocket.close();
+            }
+            
+            if (this.audioContext) {
+                await this.audioContext.close();
+            }
+        }
+    }
+    
+    // 创建音频处理器实例
+    const audioProcessor = new AudioStreamProcessor();
+    
+    // 监听视频元素
+    const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+            if (mutation.addedNodes) {
+                mutation.addedNodes.forEach((node) => {
+                    if (node.nodeName === 'VIDEO') {
+                        audioProcessor.initAudioCapture(node);
+                    }
+                });
+            }
+        });
+    });
+    
+    // 开始监听 DOM 变化
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+    </script>
+    """, unsafe_allow_html=True)
+
 # 视频部分
 with col_video:
     st.subheader("视频")
-    uploaded_video = st.file_uploader("上传视频文件", type=['mp4', 'avi'], key="video_upload")
-    st.button("开始识别", on_click=start_recognition_from_video, key="video_recognition_btn")
-    video_url = st.text_input("视频URL")
     
-    # 显示视频（优先显示上传的视频，其次显示URL视频）
+    # 在这里添加 JavaScript 注入
+    # inject_audio_capture_js()
+    
+    # 添加视频URL输入
+    video_url = st.text_input(
+        "视频URL", 
+        key="video_url",
+        placeholder="输入YouTube、Bilibili等视频链接",
+        # 当有本地视频时禁用URL输入
+        disabled=bool(st.session_state.get("video_upload"))
+    )
+    
+    # 添加本地视频上传
+    uploaded_video = st.file_uploader(
+        "上传视频文件", 
+        type=['mp4', 'avi'], 
+        key="video_upload",
+        # 当有URL时禁用文件上传
+        disabled=bool(video_url)
+    )
+    
+    # 添加两个按钮
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button(
+            "识别本地视频", 
+            on_click=start_recognition_from_video, 
+            key="local_video_btn",
+            disabled=not st.session_state.get("video_upload")
+        )
+    with col2:
+        st.button(
+            "识别在线视频", 
+            on_click=start_recognition_from_video,
+            key="url_video_btn",
+            disabled=not (video_url and video_url.startswith(('http://', 'https://')))
+        )
+    
+    # 显示视频
     if uploaded_video:
         st.video(uploaded_video)
-    elif video_url:
-        st.video(video_url)
+    elif video_url and video_url.startswith(('http://', 'https://')):
+        try:
+            st.video(video_url)
+        except Exception as e:
+            st.error(f"无法加载视频: {str(e)}")
+            st.info("提示：目前支持YouTube、Bilibili等主流视频平台的视频链接")
 
 on_timestamp = st.toggle("时间戳", value=True)
 on_speaker = st.toggle("说话人", value=True)
@@ -651,7 +959,7 @@ if 'original_text' in st.session_state and st.session_state.original_text:
             cols = st.columns(cols_per_row)
             start_idx = row * cols_per_row
             
-            # 填充当前行的列
+            # 填充当前的列
             for col_idx in range(cols_per_row):
                 speaker_idx = start_idx + col_idx
                 if speaker_idx < len(speakers):
@@ -725,7 +1033,7 @@ async def call_llm(provider: str, model: str, system_prompt: str, user_prompt: s
             else:
                 model_name = f"ollama/{model}"
             
-            # Ollama 特定的配置
+            # Ollama 特定配置
             response = completion(
                 model=model_name,
                 messages=messages,
