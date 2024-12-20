@@ -62,6 +62,9 @@ def get_available_providers() -> list:
 # 设置服务地址
 ASR_SERVICE_URL = "http://localhost:8001"
 
+# 设置页面配置
+st.set_page_config(layout="wide")
+
 @dataclass
 class RecognitionConfig:
     """识别配置"""
@@ -163,13 +166,27 @@ def stop_service():
 
 # 检查服务状态函数
 def check_service_status():
-    """检查服务状态"""
+    """检查服务状态，带超时控制"""
     try:
-        response = requests.get(f"{ASR_SERVICE_URL}/status")
+        # 设置超时时间为3秒
+        response = requests.get(
+            f"{ASR_SERVICE_URL}/status", 
+            timeout=3.0  # 连接超时和读取超时都设为3秒
+        )
         result = response.json()
         st.session_state.service_status = "运行中" if result["status"] == "running" else "已停止"
-    except Exception:
+    except requests.exceptions.Timeout:
+        # 超时异常单独处理
+        st.session_state.service_status = "连接超时"
+        st.warning(f"连接服务器超时: {ASR_SERVICE_URL}")
+    except requests.exceptions.ConnectionError:
+        # 连接错误单独处理
+        st.session_state.service_status = "无法连接"
+        st.warning(f"无法连接到服务器: {ASR_SERVICE_URL}")
+    except Exception as e:
+        # 其他异常
         st.session_state.service_status = "未知"
+        st.error(f"检查服务状态时发生错误: {str(e)}")
 
 # 初始化 session state
 if 'service_status' not in st.session_state:
@@ -207,9 +224,6 @@ def update_display_with_mapping():
         text = text.replace(f"[说话人 {speaker_id}]", f"[{name}]")
     
     st.session_state.original_text = text
-
-# 设置页面配置
-st.set_page_config(layout="wide")
 
 # 侧边栏区域
 with st.sidebar:
@@ -279,7 +293,7 @@ with st.sidebar:
             st.markdown("##### 已选模型能力")
             st.write(", ".join(sorted(capabilities)))
         
-        # 启动和关闭按钮
+        # 启动和关���按钮
         col3, col4 = st.columns(2)
         with col3:
             st.button("启动", on_click=start_service)
@@ -419,7 +433,7 @@ def format_text_with_options(text: str, segments: list, show_timestamp: bool, sh
     return formatted_text.strip()
 
 def extract_audio_from_video(video_file) -> tuple:
-    """从视频文件中提取音频，返回临时文件名和文件对象"""
+    """从视频文件中提取音频，返回临时文件名和文��对象"""
     try:
         # 创建临时文件用于保存视频
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_video:
@@ -931,7 +945,7 @@ if "recognition_text" in st.session_state and "recognition_segments" in st.sessi
     st.session_state.original_text = formatted_text
 
 # 音视频文本部分
-st.subheader("音视频文本")
+st.subheader("音频文本")
 col_original, col_corrected = st.columns(2)
 
 with col_original:
@@ -1017,7 +1031,7 @@ async def call_llm(provider: str, model: str, system_prompt: str, user_prompt: s
             response = completion(
                 model="openrouter/" + model,  # 添加 openrouter/ 前缀
                 messages=messages,
-                temperature=0.7,
+                temperature=0.1,
                 max_tokens=4096,
                 api_base="https://openrouter.ai/api/v1",
                 headers={
@@ -1037,10 +1051,9 @@ async def call_llm(provider: str, model: str, system_prompt: str, user_prompt: s
             response = completion(
                 model=model_name,
                 messages=messages,
-                temperature=0.7,
+                temperature=0.1,
                 max_tokens=model_max_tokens,
                 api_base=os.getenv("OLLAMA_HOST"),  # 使用环境变量中的地址
-                stop=["Human:", "Assistant:"]  # Qwen 特定的停止标记
             )
         else:
             # 其他模型的处理保持不变
