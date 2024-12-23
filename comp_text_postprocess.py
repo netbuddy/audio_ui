@@ -180,75 +180,76 @@ def handle_correction():
     asyncio.run(process_correction())
 
 def render_text_postprocess():
-    on_timestamp = st.toggle("时间戳", value=True)
-    on_speaker = st.toggle("说话人", value=True)
+    with st.container():
+        on_timestamp = st.toggle("时间戳", value=True)
+        on_speaker = st.toggle("说话人", value=True)
 
-    # 当选项改变时更新显示
-    if "recognition_text" in st.session_state and "recognition_segments" in st.session_state:
-        st.session_state.show_timestamp = on_timestamp
-        st.session_state.show_speaker = on_speaker
-        
-        formatted_text = format_text_with_options(
-            st.session_state.recognition_text,
-            st.session_state.recognition_segments,
-            on_timestamp,
-            on_speaker
-        )
-        st.session_state.original_text = formatted_text
-
-    # 音视频文本部分
-    st.subheader("音频文本")
-    col_original, col_corrected = st.columns(2)
-
-    with col_original:
-        st.markdown("##### 原始文本")
-        st.text_area("", height=200, key="original_text")
-
-    with col_corrected:
-        st.markdown("##### 校正文本")
-        st.text_area("", height=200, key="corrected_text")
-
-    # 说话人映射部分
-    st.subheader("说话人映射")
-
-    # 获取当前文本中的说话人
-    if 'original_text' in st.session_state and st.session_state.original_text:
-        speakers = get_speakers_from_text(st.session_state.original_text)
-        
-        if speakers:
-            # 计算每行显示的列数（最多4列）
-            cols_per_row = min(4, len(speakers))
-            rows_needed = (len(speakers) + cols_per_row - 1) // cols_per_row
+        # 当选项改变时更新显示
+        if "recognition_text" in st.session_state and "recognition_segments" in st.session_state:
+            st.session_state.show_timestamp = on_timestamp
+            st.session_state.show_speaker = on_speaker
             
-            # 按行显示说话人输入框
-            for row in range(rows_needed):
-                cols = st.columns(cols_per_row)
-                start_idx = row * cols_per_row
-                
-                # 填充当前的列
-                for col_idx in range(cols_per_row):
-                    speaker_idx = start_idx + col_idx
-                    if speaker_idx < len(speakers):
-                        speaker_id = sorted(speakers)[speaker_idx]
-                        with cols[col_idx]:
-                            st.text_input(
-                                f"说话人 {speaker_id}",
-                                key=f"speaker_name_{speaker_id}",
-                                on_change=update_speaker_mapping,
-                                placeholder="请输入说话人名字"
-                            )
-        else:
-            st.info("当前文中没有检测到说话人")
-    else:
-        st.info("请先进行语音识别")
+            formatted_text = format_text_with_options(
+                st.session_state.recognition_text,
+                st.session_state.recognition_segments,
+                on_timestamp,
+                on_speaker
+            )
+            st.session_state.original_text = formatted_text
 
-    # 修改按钮的回调函数
-    col_prompt, col_button = st.columns([5,1])
-    with col_prompt:
-        correction_prompt = st.text_input(
-            "校正提示词",
-            key="correction_prompt",
-            placeholder="请输入具体的校正要求，例如：'保持口语化风格，仅修正明显错误'"
-        )
-    with col_button:
-        st.button("发送", on_click=handle_correction)  # 使用同步包装函数
+        # 音视频文本部分
+        st.subheader("音频文本")
+        col_original, col_corrected = st.columns(2)
+
+        with col_original:
+            st.markdown("##### 原始文本")
+            st.text_area("", height=200, key="original_text")
+
+        with col_corrected:
+            st.markdown("##### 校正文本")
+            st.text_area("", height=200, key="corrected_text")
+
+        # 说话人映射部分
+        st.subheader("说话人映射")
+
+        # 获取当前文本中的说话人
+        if 'original_text' in st.session_state and st.session_state.original_text:
+            speakers = get_speakers_from_text(st.session_state.original_text)
+            
+            if speakers:
+                # 计算每行显示的列数（最多4列）
+                cols_per_row = min(4, len(speakers))
+                rows_needed = (len(speakers) + cols_per_row - 1) // cols_per_row
+                
+                # 按行显示说话人输入框
+                for row in range(rows_needed):
+                    cols = st.columns(cols_per_row)
+                    start_idx = row * cols_per_row
+                    
+                    # 填充当前的列
+                    for col_idx in range(cols_per_row):
+                        speaker_idx = start_idx + col_idx
+                        if speaker_idx < len(speakers):
+                            speaker_id = sorted(speakers)[speaker_idx]
+                            with cols[col_idx]:
+                                st.text_input(
+                                    f"说话人 {speaker_id}",
+                                    key=f"speaker_name_{speaker_id}",
+                                    on_change=update_speaker_mapping,
+                                    placeholder="请输入说话人名字"
+                                )
+            else:
+                st.info("当前文中没有检测到说话人")
+        else:
+            st.info("请先进行语音识别")
+
+        # 修改按钮的回调函数
+        col_prompt, col_button = st.columns([5,1])
+        with col_prompt:
+            correction_prompt = st.text_input(
+                "校正提示词",
+                key="correction_prompt",
+                placeholder="请输入具体的校正要求，例如：'保持口语化风格，仅修正明显错误'"
+            )
+        with col_button:
+            st.button("发送", on_click=handle_correction)  # 使用同步包装函数

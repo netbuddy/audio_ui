@@ -63,6 +63,16 @@ class StreamingConfig(BaseModel):
     hotword: Optional[str] = None
     use_itn: bool = True
 
+# 在文件开头的其他 BaseModel 类定义旁边添加
+class VADConfig(BaseModel):
+    """VAD 配置"""
+    model: str = "fsmn-vad"
+    model_revision: str = "v2.0.4"
+    min_duration_on: float = 0.02  # 最小语音段长度(秒)
+    min_duration_off: float = 0.8  # 最小静音段长度(秒)
+    window_size: int = 200  # 窗口大小(帧)
+    max_end_silence: float = 0.8  # 最大结尾静音长度(秒)
+
 class StreamingSession:
     """流式会话管理"""
     def __init__(self, websocket: WebSocket):
@@ -82,6 +92,7 @@ class ASRService:
         self.supported_formats = {".wav", ".mp3", ".pcm"}
         self.streaming_sessions = {}
         self.session_lock = Lock()
+        self.vad_model = None
         
     async def start(self, config: ModelConfig) -> Dict:
         """启动服务"""
@@ -90,25 +101,38 @@ class ASRService:
                 return {"status": "success", "message": "Service is already running"}
                 
             # 构建模型参数
-            # 将config.model作为key在model_metadata.py的audio_model_name_maps中获取model_name
-            model_name = audio_model_name_maps.get(config.model)
             model_kwargs = {
-                "model": model_name,
-                "model_revision": config.model_revision,
                 "disable_update": True
             }
             
+            # 处理 ASR 模型
+            if config.model:
+                # 检查是否是本地微调模型路径
+                if os.path.isdir(config.model):
+                    model_kwargs["model"] = config.model
+                    model_kwargs["model_revision"] = "local"
+                else:
+                    # 使用预训练模型
+                    model_name = audio_model_name_maps.get(config.model)
+                    if not model_name:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Invalid model name: {config.model}"
+                        )
+                    model_kwargs["model"] = model_name
+                    model_kwargs["model_revision"] = config.model_revision
+            
             # 添加可选模型
             if config.vad_model:
-                model_kwargs["vad_model"] = config.vad_model
+                model_kwargs["vad_model"] = audio_model_name_maps.get(config.vad_model)
                 model_kwargs["vad_model_revision"] = config.vad_model_revision
                 
             if config.punc_model:
-                model_kwargs["punc_model"] = config.punc_model
+                model_kwargs["punc_model"] = audio_model_name_maps.get(config.punc_model)
                 model_kwargs["punc_model_revision"] = config.punc_model_revision
                 
             if config.spk_model:
-                model_kwargs["spk_model"] = config.spk_model
+                model_kwargs["spk_model"] = audio_model_name_maps.get(config.spk_model)
                 model_kwargs["spk_model_revision"] = config.spk_model_revision
             
             # 初始化模型
@@ -344,6 +368,104 @@ class ASRService:
                 "status": "error",
                 "message": str(e)
             })
+
+    async def start_vad(self, config: VADConfig) -> Dict:
+        """启动 VAD 服务"""
+        try:
+            if self.vad_model:
+                return {"status": "success", "message": "VAD service is already running"}
+                
+            # 初始化 VAD 模型
+            model_name = audio_model_name_maps.get(config.model)
+            self.vad_model = AutoModel(
+                model=model_name,
+                model_revision=config.model_revision,
+                disable_update=True
+            )
+            
+            return {"status": "success", "message": "VAD service started successfully"}
+            
+        except Exception as e:
+            logger.error(f"Error starting VAD service: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+            
+    async def stop_vad(self) -> Dict:
+        """停止 VAD 服务"""
+        try:
+            if not self.vad_model:
+                return {"status": "success", "message": "VAD service is not running"}
+            
+            del self.vad_model
+            self.vad_model = None
+            
+            return {"status": "success", "message": "VAD service stopped successfully"}
+            
+        except Exception as e:
+            logger.error(f"Error stopping VAD service: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+            
+    async def process_vad(self, audio_file: UploadFile, config: VADConfig) -> Dict:
+        """处理 VAD 请求"""
+        input_path = None
+        converted_path = None
+        
+        try:
+            if not self.vad_model:
+                raise HTTPException(
+                    status_code=400,
+                    detail="VAD service is not running"
+                )
+                
+            # 验证文件格式
+            self._validate_audio_file(audio_file.filename)
+                
+            # 保存上传的文件
+            input_path = os.path.join(self.temp_dir, audio_file.filename)
+            with open(input_path, "wb") as f:
+                content = await audio_file.read()
+                f.write(content)
+                
+            # 转换音频格式
+            converted_path = await self._convert_audio(input_path)
+                
+            # 处理音频
+            result = self.vad_model.generate(
+                input=converted_path,
+                min_duration_on=config.min_duration_on,
+                min_duration_off=config.min_duration_off,
+                window_size=config.window_size,
+                max_end_silence=config.max_end_silence
+            )
+            
+            # 处理结果
+            processed_result = self._process_vad_result(result)
+            
+            return {
+                "status": "success",
+                "result": processed_result
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing VAD: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+            
+        finally:
+            # 清理临时文件
+            for path in [input_path, converted_path]:
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except Exception as e:
+                        logger.warning(f"Error removing temporary file {path}: {e}")
+                        
+    def _process_vad_result(self, result: List) -> Dict:
+        """处理 VAD 结果"""
+        if not result:
+            return {"segments": []}
+            
+        return {
+            "segments": result[0].get("value", [])
+        }
 
 # 创建 FastAPI 应用
 app = FastAPI(title="FunASR Service")
@@ -651,6 +773,24 @@ async def stream_audio(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         await websocket.close()
+
+@app.post("/vad/start")
+async def start_vad_service(config: VADConfig = VADConfig()):
+    """启动 VAD 服务"""
+    return await service.start_vad(config)
+
+@app.post("/vad/stop")
+async def stop_vad_service():
+    """停止 VAD 服务"""
+    return await service.stop_vad()
+
+@app.post("/vad/detect")
+async def detect_vad(
+    audio_file: UploadFile = File(...),
+    config: VADConfig = VADConfig()
+):
+    """处理 VAD 请求"""
+    return await service.process_vad(audio_file, config)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)

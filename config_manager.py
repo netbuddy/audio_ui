@@ -36,21 +36,29 @@ class ModelConfig:
         """获取音频模型配置"""
         return self._config.get("AUDIO_MODELS", {})
     
-    def get_model_revisions(self) -> Dict:
-        """获取模型版本信息"""
-        return self.audio_models.get("model_revisions", {})
+    @property
+    def audio_model_providers(self) -> Dict:
+        """获取音频模型供应商配置"""
+        return self._config.get("AUDIO_MODEL_PROVIDERS", {})
     
-    def get_model_names(self) -> Dict:
-        """获取模型名称映射"""
-        return self.audio_models.get("name_maps", {})
+    def get_model_revisions(self, provider: str = "FunASR") -> Dict:
+        """获取指定供应商的模型版本信息"""
+        provider_config = self.audio_model_providers.get(provider, {})
+        return provider_config.get("model_revisions", {})
+    
+    def get_model_names(self, provider: str = "FunASR") -> Dict:
+        """获取指定供应商的模型名称映射"""
+        provider_config = self.audio_model_providers.get(provider, {})
+        return provider_config.get("models", {}).get("name_maps", {})
     
     def get_model_capabilities(self) -> List:
         """获取模型能力列表"""
         return self.audio_models.get("capabilities", [])
     
-    def get_model_capability_maps(self) -> Dict:
-        """获取模型能力映射"""
-        return self.audio_models.get("capability_maps", {})
+    def get_model_capability_maps(self, provider: str = "FunASR") -> Dict:
+        """获取指定供应商的模型能力映射"""
+        provider_config = self.audio_model_providers.get(provider, {})
+        return provider_config.get("models", {}).get("capability_maps", {})
 
 # 创建全局配置实例
 config = ModelConfig() 

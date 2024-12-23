@@ -7,6 +7,8 @@ import requests
 from config_manager import config
 from dataclasses import dataclass, asdict
 import asyncio
+from comp_audio_model import build_model_config
+
 # 从环境变量获取服务地址
 ASR_SERVICE_URL = os.getenv("ASR_SERVICE_URL", "http://localhost:8001")
 
@@ -69,6 +71,21 @@ def start_recognition(audio_file=None):
             
         # 调用识别接口
         with st.spinner('正在识别音频...'):
+            # 检查是否使用微调模型
+            selected_models = st.session_state.get("selected_models", [])
+            is_finetune = any(model == "finetune_model" for model in selected_models)
+            
+            if is_finetune:
+                # 使用微调模型路径
+                finetune_dir = st.session_state.get("finetune_model_dir")
+                model_config = {
+                    "model": finetune_dir,
+                    "model_revision": "local"
+                }
+            else:
+                # 使用原有的模型配置
+                model_config = build_model_config(selected_models)
+            
             response = requests.post(
                 f"{ASR_SERVICE_URL}/recognize",
                 files={
@@ -78,12 +95,15 @@ def start_recognition(audio_file=None):
                         "audio/wav"
                     )
                 },
-                json=asdict(RecognitionConfig(
-                    batch_size_s=300,
-                    use_timestamp=True,
-                    use_itn=True,
-                    max_single_segment=10000
-                ))
+                json={
+                    **asdict(RecognitionConfig(
+                        batch_size_s=300,
+                        use_timestamp=True,
+                        use_itn=True,
+                        max_single_segment=10000
+                    )),
+                    **model_config
+                }
             )
             
             if response.status_code == 200:
