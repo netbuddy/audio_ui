@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.websockets import WebSocketState
 from pydantic import BaseModel
 from typing import Dict, Optional, List
 import uvicorn
@@ -16,10 +17,23 @@ import json
 import time
 from model_metadata import audio_model_name_maps
 from sse_starlette.sse import EventSourceResponse
-import websockets
+from fastapi import WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile
+
 # 配置日志
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()  # 添加控制台处理器
+    ]
+)
 logger = logging.getLogger(__name__)
+
+# 确保 FastAPI 的日志也被配置
+uvicorn_logger = logging.getLogger("uvicorn")
+uvicorn_logger.handlers = []  # 清除现有的处理器
+uvicorn_logger.addHandler(logging.StreamHandler())
+uvicorn_logger.setLevel(logging.INFO)
 
 class ModelType(str, Enum):
     """模型类型"""
@@ -63,7 +77,7 @@ class StreamingConfig(BaseModel):
     hotword: Optional[str] = None
     use_itn: bool = True
 
-# 在文件开头的其他 BaseModel 类定义旁边添加
+# 在件开头的其他 BaseModel 类定义旁边添加
 class VADConfig(BaseModel):
     """VAD 配置"""
     model: str = "fsmn-vad"
@@ -93,6 +107,8 @@ class ASRService:
         self.streaming_sessions = {}
         self.session_lock = Lock()
         self.vad_model = None
+        self.streaming_model = None
+        self.accept_ws_connections = False  # 添加标志控制是否接受 WebSocket 连接
         
     async def start(self, config: ModelConfig) -> Dict:
         """启动服务"""
@@ -100,7 +116,7 @@ class ASRService:
             if self.is_running:
                 return {"status": "success", "message": "Service is already running"}
                 
-            # 构建模型参数
+            # ��建模型参数
             model_kwargs = {
                 "disable_update": True
             }
@@ -139,6 +155,7 @@ class ASRService:
             self.model = AutoModel(**model_kwargs)
             self.config = config
             self.is_running = True
+            self.accept_ws_connections = True  # 允许接受 WebSocket 连接
             
             return {"status": "success", "message": "Service started successfully"}
             
@@ -152,9 +169,14 @@ class ASRService:
             if not self.is_running:
                 return {"status": "success", "message": "Service is not running"}
             
-            # 需要删除self.model
-            del self.model
-            self.model = None
+            # 清理模型资源
+            if self.model:
+                del self.model
+                self.model = None
+            if self.streaming_model:
+                del self.streaming_model
+                self.streaming_model = None
+                
             self.is_running = False
             self.config = None
             
@@ -467,6 +489,63 @@ class ASRService:
             "segments": result[0].get("value", [])
         }
 
+    async def handle_stream(self, websocket: WebSocket):
+        """处理流式音频识别"""
+        try:
+            await websocket.accept()
+            logger.info("Client connected")
+            
+            # 初始化流式识别模型
+            model = AutoModel(
+                model="paraformer-zh-streaming", 
+                model_revision="v2.0.4"
+            )
+            cache = {}
+            
+            # 流式识别参数
+            chunk_size = [0, 10, 5]  # 600ms
+            encoder_chunk_look_back = 4
+            decoder_chunk_look_back = 1
+            chunk_stride = chunk_size[1] * 960
+            
+            while True:
+                try:
+                    # 接收音频数据
+                    audio_data = await websocket.receive_bytes()
+                    audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                    
+                    # 分块处理音频
+                    total_chunk_num = int(len(audio_array - 1) / chunk_stride + 1)
+                    for i in range(total_chunk_num):
+                        speech_chunk = audio_array[i * chunk_stride:(i + 1) * chunk_stride]
+                        is_final = i == total_chunk_num - 1
+                        
+                        # 识别当前块
+                        result = model.generate(
+                            input=speech_chunk,
+                            cache=cache,
+                            is_final=is_final,
+                            chunk_size=chunk_size,
+                            encoder_chunk_look_back=encoder_chunk_look_back,
+                            decoder_chunk_look_back=decoder_chunk_look_back
+                        )
+                        
+                        # 发送识别结果
+                        if result:
+                            await websocket.send_json({
+                                "text": result[0]["text"],
+                                "is_final": is_final
+                            })
+                            
+                except WebSocketDisconnect:
+                    logger.info("Client disconnected")
+                    break
+                    
+        except Exception as e:
+            logger.error(f"WebSocket error: {e}")
+            if websocket.client_state != WebSocketState.DISCONNECTED:
+                await websocket.close()
+
 # 创建 FastAPI 应用
 app = FastAPI(title="FunASR Service")
 service = ASRService()
@@ -711,68 +790,61 @@ async def recognize_stream(request: StreamRequest):
 
 @app.websocket("/stream")
 async def stream_audio(websocket: WebSocket):
-    """处理从浏览器发送的音频流"""
+    """处理流式音频识别"""
     try:
         await websocket.accept()
-        session = StreamingSession(websocket)
+        logger.info("Client connected")
         
-        with service.session_lock:
-            service.streaming_sessions[id(websocket)] = session
-            
-        try:
-            while True:
+        # 初始化流式识别模型
+        model = AutoModel(
+            model="paraformer-zh-streaming", 
+            model_revision="v2.0.4"
+        )
+        cache = {}
+        
+        # 流式识别参数
+        chunk_size = [0, 10, 5]  # 600ms
+        encoder_chunk_look_back = 4
+        decoder_chunk_look_back = 1
+        chunk_stride = chunk_size[1] * 960
+        
+        while True:
+            try:
                 # 接收音频数据
-                data = await websocket.receive_bytes()
+                audio_data = await websocket.receive_bytes()
+                audio_array = np.frombuffer(audio_data, dtype=np.int16)
                 
-                # 处理音频数据
-                audio_array = np.frombuffer(data, dtype=np.int16)
-                
-                # 使用模型处理
-                result = service.model.generate(
-                    input=audio_array,
-                    cache=session.cache,
-                    is_final=False,
-                    chunk_size=[0, 10, 5],
-                    encoder_chunk_look_back=4,
-                    decoder_chunk_look_back=1
-                )
-                
-                if result:
-                    await websocket.send_json({
-                        "status": "success",
-                        "result": service._process_result(result)
-                    })
+                # 分块处理音频
+                total_chunk_num = int(len(audio_array - 1) / chunk_stride + 1)
+                for i in range(total_chunk_num):
+                    speech_chunk = audio_array[i * chunk_stride:(i + 1) * chunk_stride]
+                    is_final = i == total_chunk_num - 1
                     
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("WebSocket connection closed")
-            
-        finally:
-            # 处理最后一块数据
-            if session.cache:
-                try:
-                    final_result = service.model.generate(
-                        input=b"",
-                        cache=session.cache,
-                        is_final=True
+                    # 识别当前块
+                    result = model.generate(
+                        input=speech_chunk,
+                        cache=cache,
+                        is_final=is_final,
+                        chunk_size=chunk_size,
+                        encoder_chunk_look_back=encoder_chunk_look_back,
+                        decoder_chunk_look_back=decoder_chunk_look_back
                     )
                     
-                    if final_result:
+                    # 发送识别结果
+                    if result:
                         await websocket.send_json({
-                            "status": "success",
-                            "result": service._process_result(final_result),
-                            "is_final": True
+                            "text": result[0]["text"],
+                            "is_final": is_final
                         })
-                except Exception as e:
-                    logger.error(f"Error processing final chunk: {e}")
-                    
-            # 清理会话
-            with service.session_lock:
-                if id(websocket) in service.streaming_sessions:
-                    del service.streaming_sessions[id(websocket)]
-                    
+                        
+            except WebSocketDisconnect:
+                logger.info("Client disconnected")
+                break
+                
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        await websocket.close()
+        if websocket.client_state != WebSocketState.DISCONNECTED:
+            await websocket.close()
 
 @app.post("/vad/start")
 async def start_vad_service(config: VADConfig = VADConfig()):

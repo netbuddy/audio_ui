@@ -8,6 +8,12 @@ from config_manager import config
 from dataclasses import dataclass, asdict
 import asyncio
 from comp_audio_model import build_model_config
+import websockets
+import json
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
+import wave
+import io
+import ffmpeg
 
 # 从环境变量获取服务地址
 ASR_SERVICE_URL = os.getenv("ASR_SERVICE_URL", "http://localhost:8001")
@@ -150,27 +156,109 @@ def render_audio_section():
     if uploaded_file:
         st.audio(uploaded_file)
     
+    # 使用 session_state 跟踪麦克风状态
+    if "last_mic_id" not in st.session_state:
+        st.session_state.last_mic_id = None
+    
     mic_value = st.audio_input("麦克风")
     if mic_value:
-        process_audio_input(mic_value)
+        # 检查是否是新的录音
+        current_mic_id = id(mic_value)
+        if current_mic_id != st.session_state.last_mic_id:
+            st.session_state.last_mic_id = current_mic_id
+            asyncio.run(process_audio_input(mic_value))
 
-
-
-def process_audio_input(audio_data):
-    # """处理音频输入"""
-    # try:
-    #     # 创建临时文件保存录音
-    #     with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
-    #         # 写入录音数据
-    #         tmp_file.write(audio_data)
-    #         audio_path = tmp_file.name
+async def process_audio_input(audio_data):
+    """处理音频输入"""
+    try:
+        # 初始化 session state
+        if "streaming_text" not in st.session_state:
+            st.session_state.streaming_text = ""
             
-    #     # 开始识别
-    #     asyncio.run(process_audio(audio_path))
+        # 获取音频二进制数据
+        audio_bytes = audio_data.getvalue()
         
-    #     # 清理临时文件
-    #     os.unlink(audio_path)
-        
-    # except Exception as e:
-    #     st.error(f"处理录音时发生错误: {str(e)}")
-    pass
+        # 使用 wave 模块解析音频格式
+        with wave.open(io.BytesIO(audio_bytes), 'rb') as wav_file:
+            # 获取音频参数
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            frame_rate = wav_file.getframerate()
+            n_frames = wav_file.getnframes()
+            
+            print(f"原始音频格式信息:")
+            print(f"- 声道数: {channels}")
+            print(f"- 采样宽度: {sample_width * 8}bit")
+            print(f"- 采样率: {frame_rate}Hz")
+            print(f"- 总帧数: {n_frames}")
+            print(f"- 时长: {n_frames/frame_rate:.2f}秒")
+            
+        # 转换音频格式
+        try:
+            # 使用 ffmpeg 转换音频格式
+            process = (
+                ffmpeg
+                .input('pipe:', format='wav')  # 从内存读取
+                .output(
+                    'pipe:',  # 输出到内存
+                    format='wav',        # WAV 格式
+                    acodec='pcm_s16le',  # 16bit
+                    ac=1,               # 单声道
+                    ar=16000           # 16kHz
+                )
+                .overwrite_output()
+                .run_async(pipe_stdin=True, pipe_stdout=True, pipe_stderr=True)
+            )
+            
+            # 写入音频数据
+            stdout_data, stderr_data = process.communicate(input=audio_bytes)
+            
+            if process.returncode != 0:
+                raise RuntimeError(f"FFmpeg 转换失败: {stderr_data.decode()}")
+                
+            # 转换后的音频数据
+            audio_bytes = stdout_data
+            
+            print("音频格式转换完成")
+            
+        except Exception as e:
+            raise RuntimeError(f"音频格式转换失败: {str(e)}")
+            
+        # 通过 WebSocket 连接服务器
+        ws_url = f"ws://{ASR_SERVICE_URL.replace('http://', '')}/stream"
+        async with websockets.connect(ws_url) as websocket:
+            # 发送音频数据
+            await websocket.send(audio_bytes)
+            print("音频数据发送完成")
+            
+            # 接收识别结果
+            full_text = ""
+            while True:
+                try:
+                    result = await websocket.recv()
+                    print(f"接收到原始数据: {result}")
+                    result = json.loads(result)
+                    print(f"解析后的数据: {result}")
+                    
+                    if "text" in result and result["text"]:
+                        print(f"收到文本: {result['text']}")
+                        full_text += result["text"]
+                        st.session_state.original_text = full_text
+                        print(f"当前完整文本: {full_text}")
+                    else:
+                        print("接收到的数据中没有文本内容")
+                    
+                    if result.get("is_final", False):
+                        print("识别完成")
+                        break
+                        
+                except websockets.exceptions.ConnectionClosed:
+                    print("WebSocket连接已关闭")
+                    break
+                except json.JSONDecodeError as e:
+                    print(f"JSON解析错误: {e}")
+                    break
+                    
+    except Exception as e:
+        print(f"错误: {str(e)}")
+        st.error(f"处理录音时发生错误: {str(e)}")
