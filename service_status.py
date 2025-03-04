@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 从环境变量获取服务地址
-ASR_SERVICE_URL = os.getenv("ASR_SERVICE_URL", "http://localhost:8001")
+ASR_SERVICE_URL = os.getenv("ASR_SERVICE_URL", "http://localhost:8003")
 
 def check_service_status():
     """检查服务状态，带超时控制"""
